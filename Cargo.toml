@@ -1,0 +1,19 @@
+[package]
+name = "wgpu-isosurface"
+version = "0.1.0"
+authors = ["Duncan <bonsairobo@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bytemuck = "1.5"
+futures = "0.3"
+
+[dependencies.wgpu]
+# version = "0.7"
+git = "https://github.com/gfx-rs/wgpu-rs"
+# branch = "master"
+rev = "1de388af"
+
+[[bin]]
+name = "generate"
+path = "src/bin/generate.rs"
