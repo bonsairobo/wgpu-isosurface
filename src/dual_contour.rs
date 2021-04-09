@@ -29,6 +29,7 @@ impl DualContourPipeline {
             entry_point: "main",
         });
 
+        // TODO: combine the staging in and out buffers?
         let staging_in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Input Staging Buffer"),
             size: buffer_size_bytes,
@@ -126,7 +127,7 @@ impl DualContourPipeline {
         // Submits command encoder for processing.
         queue.submit(Some(encoder.finish()));
 
-        // Gets the future representing when `staging_buffer` can be read from
+        // Gets the future representing when `buffer` can be read from
         let buffer_is_mapped = Box::new(
             self.staging_out_buffer
                 .slice(..)
@@ -134,31 +135,31 @@ impl DualContourPipeline {
         );
 
         DualContourOutputBuffer {
-            staging_buffer: &self.staging_out_buffer,
+            buffer: &self.staging_out_buffer,
             buffer_is_mapped,
         }
     }
 }
 
 pub struct DualContourOutputBuffer<'a> {
-    staging_buffer: &'a wgpu::Buffer,
+    buffer: &'a wgpu::Buffer,
     buffer_is_mapped: Box<dyn Future<Output = Result<(), wgpu::BufferAsyncError>> + Unpin>,
 }
 
 impl<'a> DualContourOutputBuffer<'a> {
     pub async fn unwrap(self) -> Vec<u32> {
-        // Awaits until `staging_buffer` can be read from.
+        // Awaits until `buffer` can be read from.
         match self.buffer_is_mapped.await {
             Ok(()) => {
                 let result = {
-                    let data = self.staging_buffer.slice(..).get_mapped_range();
+                    let data = self.buffer.slice(..).get_mapped_range();
 
                     // Converts bytes back to u32.
                     data.chunks_exact(4)
                         .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
                         .collect()
                 }; // With the current interface, we have to make sure all mapped views are dropped before we unmap the buffer.
-                self.staging_buffer.unmap();
+                self.buffer.unmap();
 
                 result
             }

@@ -8,12 +8,10 @@ fn main() {
     let adapter = block_on(get_default_adapter()).unwrap();
     println!("Using adapter: {:?}", adapter);
     let (device, queue) = block_on(request_default_device(&adapter));
-
     let device = Arc::new(device);
-
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
-    // Actually run the compute shader.
+    // Pipeline and buffers initialization.
     let input = [1000; 1000000];
     let buffer_size_bytes = std::mem::size_of_val(&input) as wgpu::BufferAddress;
     let pipe = DualContourPipeline::new(&device, shader_flags, buffer_size_bytes);
@@ -22,6 +20,7 @@ fn main() {
     device.poll(wgpu::Maintain::Wait);
     spawn_polling_thread(device.clone());
 
+    // Actually run the compute shader.
     for _ in 0..10 {
         timed_dispatch(&pipe, &input, &device, &queue);
     }
