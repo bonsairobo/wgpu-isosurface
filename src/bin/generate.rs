@@ -14,7 +14,7 @@ fn main() {
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
     // Actually run the compute shader.
-    let input = [1000; 100000];
+    let input = [1000; 1000000];
     let buffer_size_bytes = std::mem::size_of_val(&input) as wgpu::BufferAddress;
     let pipe = DualContourPipeline::new(&device, shader_flags, buffer_size_bytes);
 

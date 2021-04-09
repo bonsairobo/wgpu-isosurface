@@ -38,7 +38,7 @@ fn collatz_iterations(n_base: u32) -> u32 {
     return i;
 }
 
-[[stage(compute), workgroup_size(64)]]
+[[stage(compute), workgroup_size(16)]]
 fn main([[builtin(global_invocation_id)]] global_id: vec3<u32>) {
     output.data[global_id.x] = collatz_iterations(input.data[global_id.x]);
 }
