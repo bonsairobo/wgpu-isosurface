@@ -1,33 +1,49 @@
 use wgpu_isosurface::DualContourPipeline;
 
 use futures::{executor::block_on, Future};
+use std::sync::Arc;
 
 fn main() {
     // WGPU initialization.
     let adapter = block_on(get_default_adapter()).unwrap();
+    println!("Using adapter: {:?}", adapter);
     let (device, queue) = block_on(request_default_device(&adapter));
+
+    let device = Arc::new(device);
+
+    spawn_polling_thread(device.clone());
+
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
     // Actually run the compute shader.
-    let shader = DualContourPipeline::new(&device, shader_flags);
-    let input = vec![999; 100000];
+    let pipe = DualContourPipeline::new(&device, shader_flags);
 
-    let before = std::time::Instant::now();
+    for _ in 0..10 {
+        timed_dispatch(&pipe, &device, &queue);
+    }
+}
 
-    let output = block_on(shader.dispatch(&input, &device, &queue));
+fn timed_dispatch(pipe: &DualContourPipeline, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let input = vec![1000; 10000];
 
-    // Poll the device in a blocking manner so that our future resolves. In an actual application, `device.poll(...)` should be
-    // called in an event loop or on another thread.
-    device.poll(wgpu::Maintain::Wait);
+    let t1 = std::time::Instant::now();
+    let output = pipe.dispatch(&input, &device, &queue);
 
+    let t2 = std::time::Instant::now();
     let _output = block_on(output.unwrap());
+    let t3 = std::time::Instant::now();
 
-    let after = std::time::Instant::now();
+    let d1 = (t2 - t1).as_micros();
+    let d2 = (t3 - t2).as_micros();
 
-    // println!("{:?}", output);
+    println!("Dipatch took {} micros", d1);
+    println!("Unwrap took {} micros", d2);
+}
 
-    let duration = (after - before).as_micros();
-    println!("Took {} micros", duration);
+fn spawn_polling_thread(device: Arc<wgpu::Device>) {
+    std::thread::spawn(move || loop {
+        device.poll(wgpu::Maintain::Wait);
+    });
 }
 
 fn default_shader_flags(backend: wgpu::Backend) -> wgpu::ShaderFlags {

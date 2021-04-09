@@ -24,7 +24,7 @@ impl DualContourPipeline {
         Self { pipeline }
     }
 
-    pub async fn dispatch(
+    pub fn dispatch(
         &self,
         input: &[u32],
         device: &wgpu::Device,
@@ -57,7 +57,7 @@ impl DualContourPipeline {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.insert_debug_marker("compute collatz iterations");
+            // pass.insert_debug_marker("compute collatz iterations");
             pass.dispatch(input.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
         }
 
