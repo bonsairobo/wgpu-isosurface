@@ -11,23 +11,30 @@ fn main() {
 
     let device = Arc::new(device);
 
-    spawn_polling_thread(device.clone());
-
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
     // Actually run the compute shader.
-    let pipe = DualContourPipeline::new(&device, shader_flags);
+    let input = [1000; 100000];
+    let buffer_size_bytes = std::mem::size_of_val(&input) as wgpu::BufferAddress;
+    let pipe = DualContourPipeline::new(&device, shader_flags, buffer_size_bytes);
+
+    // Poll once to clear the work queue, then start polling continuously.
+    device.poll(wgpu::Maintain::Wait);
+    spawn_polling_thread(device.clone());
 
     for _ in 0..10 {
-        timed_dispatch(&pipe, &device, &queue);
+        timed_dispatch(&pipe, &input, &device, &queue);
     }
 }
 
-fn timed_dispatch(pipe: &DualContourPipeline, device: &wgpu::Device, queue: &wgpu::Queue) {
-    let input = vec![1000; 10000];
-
+fn timed_dispatch(
+    pipe: &DualContourPipeline,
+    input: &[u32],
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
     let t1 = std::time::Instant::now();
-    let output = pipe.dispatch(&input, &device, &queue);
+    let output = block_on(pipe.dispatch(input, device, queue));
 
     let t2 = std::time::Instant::now();
     let _output = block_on(output.unwrap());

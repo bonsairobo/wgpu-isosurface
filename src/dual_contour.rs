@@ -1,14 +1,22 @@
 use futures::Future;
 use std::borrow::Cow;
 use std::convert::TryInto;
-use wgpu::util::DeviceExt;
 
 pub struct DualContourPipeline {
     pipeline: wgpu::ComputePipeline,
+    buffer_size_bytes: u64,
+    staging_in_buffer: wgpu::Buffer,
+    gpu_in_buffer: wgpu::Buffer,
+    gpu_out_buffer: wgpu::Buffer,
+    staging_out_buffer: wgpu::Buffer,
 }
 
 impl DualContourPipeline {
-    pub fn new(device: &wgpu::Device, shader_flags: wgpu::ShaderFlags) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shader_flags: wgpu::ShaderFlags,
+        buffer_size_bytes: wgpu::BufferAddress,
+    ) -> Self {
         let module = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("dual_contour.wgsl"))),
@@ -21,36 +29,81 @@ impl DualContourPipeline {
             entry_point: "main",
         });
 
-        Self { pipeline }
+        let staging_in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Input Staging Buffer"),
+            size: buffer_size_bytes,
+            usage: wgpu::BufferUsage::MAP_WRITE | wgpu::BufferUsage::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let gpu_in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Input Storage Buffer"),
+            size: buffer_size_bytes,
+            usage: wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::STORAGE,
+            mapped_at_creation: false,
+        });
+        let gpu_out_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Storage Buffer"),
+            size: buffer_size_bytes,
+            usage: wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging_out_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Staging Buffer"),
+            size: buffer_size_bytes,
+            usage: wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            buffer_size_bytes,
+            staging_in_buffer,
+            gpu_in_buffer,
+            gpu_out_buffer,
+            staging_out_buffer,
+        }
     }
 
-    pub fn dispatch(
-        &self,
+    pub async fn dispatch<'a>(
+        &'a self,
         input: &[u32],
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> DualContourOutputBuffer {
-        // GPU-side buffer for shader input and output.
-        let storage_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Storage Buffer"),
-            contents: bytemuck::cast_slice(&input),
-            usage: wgpu::BufferUsage::STORAGE
-                | wgpu::BufferUsage::COPY_DST
-                | wgpu::BufferUsage::COPY_SRC,
-        });
-
+    ) -> DualContourOutputBuffer<'a> {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        let in_slice = self.staging_in_buffer.slice(..);
+        in_slice.map_async(wgpu::MapMode::Write).await.unwrap();
+        in_slice
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(input));
+        self.staging_in_buffer.unmap();
+
+        encoder.copy_buffer_to_buffer(
+            &self.staging_in_buffer,
+            0,
+            &self.gpu_in_buffer,
+            0,
+            self.buffer_size_bytes,
+        );
+
         {
             // Bind the storage to the shader interface.
             let bind_group_layout = self.pipeline.get_bind_group_layout(0);
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: storage_buffer.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gpu_in_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.gpu_out_buffer.as_entire_binding(),
+                    },
+                ],
             });
 
             // Encode our commands to dispatch the pipeline.
@@ -62,34 +115,37 @@ impl DualContourPipeline {
         }
 
         // Encode a command to copy the output back to our staging buffer.
-        let buffer_size_bytes = std::mem::size_of_val(input) as wgpu::BufferAddress;
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsage::MAP_READ | wgpu::BufferUsage::COPY_DST,
-            mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(&storage_buffer, 0, &staging_buffer, 0, buffer_size_bytes);
+        encoder.copy_buffer_to_buffer(
+            &self.gpu_out_buffer,
+            0,
+            &self.staging_out_buffer,
+            0,
+            self.buffer_size_bytes,
+        );
 
         // Submits command encoder for processing.
         queue.submit(Some(encoder.finish()));
 
         // Gets the future representing when `staging_buffer` can be read from
-        let buffer_is_mapped = Box::new(staging_buffer.slice(..).map_async(wgpu::MapMode::Read));
+        let buffer_is_mapped = Box::new(
+            self.staging_out_buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read),
+        );
 
         DualContourOutputBuffer {
-            staging_buffer,
+            staging_buffer: &self.staging_out_buffer,
             buffer_is_mapped,
         }
     }
 }
 
-pub struct DualContourOutputBuffer {
-    staging_buffer: wgpu::Buffer,
+pub struct DualContourOutputBuffer<'a> {
+    staging_buffer: &'a wgpu::Buffer,
     buffer_is_mapped: Box<dyn Future<Output = Result<(), wgpu::BufferAsyncError>> + Unpin>,
 }
 
-impl DualContourOutputBuffer {
+impl<'a> DualContourOutputBuffer<'a> {
     pub async fn unwrap(self) -> Vec<u32> {
         // Awaits until `staging_buffer` can be read from.
         match self.buffer_is_mapped.await {
