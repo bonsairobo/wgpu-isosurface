@@ -1,44 +1,30 @@
-[[block]]
-struct Numbers {
-    data: [[stride(4)]] array<u32>;
-};
-
 [[group(0), binding(0)]]
-var<storage> input: [[access(read)]] Numbers;
+var sdf: [[access(read)]] texture_storage_3d<r32float>;
 
 [[group(0), binding(1)]]
-var<storage> output: [[access(write)]] Numbers;
+var surface: [[access(write)]] texture_storage_3d<r32uint>;
 
-// The Collatz Conjecture states that for any integer n:
-// If n is even, n = n/2
-// If n is odd, n = 3n+1
-// And repeat this process for each new n, you will always eventually reach 1.
-// Though the conjecture has not been proven, no counterexample has ever been found.
-// This function returns how many times this recurrence needs to be applied to reach 1.
-fn collatz_iterations(n_base: u32) -> u32 {
-    var n: u32 = n_base;
-    var i: u32 = 0u;
-    loop {
-        if (n <= 1u) {
-            break;
-        }
-        if (n % 2u == 0u) {
-            n = n / 2u;
-        }
-        else {
-            // Overflow? (i.e. 3*n + 1 > 0xffffffffu?)
-            if (n >= 1431655765u) {   // 0x55555555u
-                return 4294967295u;   // 0xffffffffu
+fn check_surface(cell_min: vec3<u32>) -> u32 {
+    var num_negative: u32 = 0u;
+    for (var dx: u32 = 0u; dx <= 1u; dx = dx + 1u) {
+        for (var dy: u32 = 0u; dy <= 1u; dy = dy + 1u) {
+            for (var dz: u32 = 0u; dz <= 1u; dz = dz + 1u) {
+                const corner: vec3<u32> = cell_min + vec3<u32>(dx, dy, dz);
+                const corner_d: f32 = textureLoad(sdf, vec3<i32>(corner)).r;
+                if (corner_d < 0.0) {
+                    num_negative = num_negative + 1u;
+                }
             }
-
-            n = 3u * n + 1u;
         }
-        i = i + 1u;
     }
-    return i;
+    if (num_negative != 0u && num_negative != 8u) {
+        return 1u;
+    } else {
+        return 0u;
+    }
 }
 
-[[stage(compute), workgroup_size(16)]]
+[[stage(compute), workgroup_size(8, 8, 8)]]
 fn main([[builtin(global_invocation_id)]] global_id: vec3<u32>) {
-    output.data[global_id.x] = collatz_iterations(input.data[global_id.x]);
+    textureStore(surface, vec3<i32>(global_id), vec4<u32>(check_surface(global_id), 0u, 0u, 1u));
 }

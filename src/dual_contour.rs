@@ -1,21 +1,22 @@
 use futures::Future;
 use std::borrow::Cow;
 use std::convert::TryInto;
+use std::num::NonZeroU32;
 
 pub struct DualContourPipeline {
     pipeline: wgpu::ComputePipeline,
-    buffer_size_bytes: u64,
-    staging_in_buffer: wgpu::Buffer,
-    gpu_in_buffer: wgpu::Buffer,
-    gpu_out_buffer: wgpu::Buffer,
-    staging_out_buffer: wgpu::Buffer,
+    sdf_texture: wgpu::Texture,
+    surface_texture: wgpu::Texture,
+    sdf_staging_buffer: wgpu::Buffer,
+    surface_staging_buffer: wgpu::Buffer,
+    extent: wgpu::Extent3d,
 }
 
 impl DualContourPipeline {
     pub fn new(
         device: &wgpu::Device,
         shader_flags: wgpu::ShaderFlags,
-        buffer_size_bytes: wgpu::BufferAddress,
+        extent: wgpu::Extent3d,
     ) -> Self {
         let module = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
@@ -29,67 +30,97 @@ impl DualContourPipeline {
             entry_point: "main",
         });
 
-        // TODO: combine the staging in and out buffers?
-        let staging_in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Input Staging Buffer"),
-            size: buffer_size_bytes,
+        let sdf_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SDF Texture"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsage::COPY_DST | wgpu::TextureUsage::STORAGE,
+        });
+        let surface_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surface Texture"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::STORAGE,
+        });
+
+        let texture_volume = extent_volume(extent);
+
+        let sdf_buffer_size_bytes = std::mem::size_of::<f32>() as u64 * texture_volume;
+        let surface_buffer_size_bytes = std::mem::size_of::<u32>() as u64 * texture_volume;
+
+        let sdf_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SDF Staging Buffer"),
+            size: sdf_buffer_size_bytes,
             usage: wgpu::BufferUsage::MAP_WRITE | wgpu::BufferUsage::COPY_SRC,
             mapped_at_creation: false,
         });
-        let gpu_in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Input Storage Buffer"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::STORAGE,
-            mapped_at_creation: false,
-        });
-        let gpu_out_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Storage Buffer"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let staging_out_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Staging Buffer"),
-            size: buffer_size_bytes,
+        let surface_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Surface Staging Buffer"),
+            size: surface_buffer_size_bytes,
             usage: wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
             mapped_at_creation: false,
         });
 
         Self {
             pipeline,
-            buffer_size_bytes,
-            staging_in_buffer,
-            gpu_in_buffer,
-            gpu_out_buffer,
-            staging_out_buffer,
+            sdf_texture,
+            surface_texture,
+            sdf_staging_buffer,
+            surface_staging_buffer,
+            extent,
         }
     }
 
     pub async fn dispatch<'a>(
         &'a self,
-        input: &[u32],
+        input: &[f32],
+        dimensions: [u32; 3],
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> DualContourOutputBuffer<'a> {
+        assert_eq!(input.len() as u64, extent_volume(self.extent));
+
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        let in_slice = self.staging_in_buffer.slice(..);
+        let in_slice = self.sdf_staging_buffer.slice(..);
         in_slice.map_async(wgpu::MapMode::Write).await.unwrap();
         in_slice
             .get_mapped_range_mut()
             .copy_from_slice(bytemuck::cast_slice(input));
-        self.staging_in_buffer.unmap();
+        self.sdf_staging_buffer.unmap();
 
-        encoder.copy_buffer_to_buffer(
-            &self.staging_in_buffer,
-            0,
-            &self.gpu_in_buffer,
-            0,
-            self.buffer_size_bytes,
+        encoder.copy_buffer_to_texture(
+            wgpu::ImageCopyBuffer {
+                buffer: &self.sdf_staging_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(NonZeroU32::new(4 * self.extent.width).unwrap()),
+                    rows_per_image: Some(NonZeroU32::new(self.extent.height).unwrap()),
+                },
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.sdf_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            self.extent,
         );
 
         {
+            let sdf_texture_view = self
+                .sdf_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let surface_texture_view = self
+                .surface_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
             // Bind the storage to the shader interface.
             let bind_group_layout = self.pipeline.get_bind_group_layout(0);
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -98,11 +129,11 @@ impl DualContourPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.gpu_in_buffer.as_entire_binding(),
+                        resource: wgpu::BindingResource::TextureView(&sdf_texture_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.gpu_out_buffer.as_entire_binding(),
+                        resource: wgpu::BindingResource::TextureView(&surface_texture_view),
                     },
                 ],
             });
@@ -111,17 +142,26 @@ impl DualContourPipeline {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            // pass.insert_debug_marker("compute collatz iterations");
-            pass.dispatch(input.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
+            // The compute kernel is 2x2x2, so don't look at all texels.
+            pass.dispatch(dimensions[0] - 1, dimensions[1] - 1, dimensions[2] - 1);
         }
 
         // Encode a command to copy the output back to our staging buffer.
-        encoder.copy_buffer_to_buffer(
-            &self.gpu_out_buffer,
-            0,
-            &self.staging_out_buffer,
-            0,
-            self.buffer_size_bytes,
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self.surface_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &self.surface_staging_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(NonZeroU32::new(4 * self.extent.width).unwrap()),
+                    rows_per_image: Some(NonZeroU32::new(self.extent.height).unwrap()),
+                },
+            },
+            self.extent,
         );
 
         // Submits command encoder for processing.
@@ -129,13 +169,13 @@ impl DualContourPipeline {
 
         // Gets the future representing when `buffer` can be read from
         let buffer_is_mapped = Box::new(
-            self.staging_out_buffer
+            self.surface_staging_buffer
                 .slice(..)
                 .map_async(wgpu::MapMode::Read),
         );
 
         DualContourOutputBuffer {
-            buffer: &self.staging_out_buffer,
+            buffer: &self.surface_staging_buffer,
             buffer_is_mapped,
         }
     }
@@ -168,4 +208,8 @@ impl<'a> DualContourOutputBuffer<'a> {
             }
         }
     }
+}
+
+pub fn extent_volume(e: wgpu::Extent3d) -> u64 {
+    (e.width * e.height * e.depth_or_array_layers) as u64
 }

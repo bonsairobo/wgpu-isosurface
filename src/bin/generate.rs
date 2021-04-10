@@ -1,5 +1,6 @@
 use wgpu_isosurface::DualContourPipeline;
 
+use building_blocks::prelude::*;
 use futures::{executor::block_on, Future};
 use std::sync::Arc;
 
@@ -11,10 +12,20 @@ fn main() {
     let device = Arc::new(device);
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
+    // Data set.
+    let extent = Extent3i::from_min_and_shape(Point3i::fill(-32), Point3i::fill(64));
+    let sdf = Array3x1::fill_with(extent, |p| 20.0 - p.norm());
+    let input = sdf.into_parts().1.take_store();
+    let dim = extent.shape;
+    let texture_extent = wgpu::Extent3d {
+        width: dim.x() as u32,
+        height: dim.y() as u32,
+        depth_or_array_layers: dim.z() as u32,
+    };
+    let dim = [dim.x() as u32, dim.y() as u32, dim.z() as u32];
+
     // Pipeline and buffers initialization.
-    let input = [1000; 1000000];
-    let buffer_size_bytes = std::mem::size_of_val(&input) as wgpu::BufferAddress;
-    let pipe = DualContourPipeline::new(&device, shader_flags, buffer_size_bytes);
+    let pipe = DualContourPipeline::new(&device, shader_flags, texture_extent);
 
     // Poll once to clear the work queue, then start polling continuously.
     device.poll(wgpu::Maintain::Wait);
@@ -22,18 +33,19 @@ fn main() {
 
     // Actually run the compute shader.
     for _ in 0..10 {
-        timed_dispatch(&pipe, &input, &device, &queue);
+        timed_dispatch(&pipe, &input, dim, &device, &queue);
     }
 }
 
 fn timed_dispatch(
     pipe: &DualContourPipeline,
-    input: &[u32],
+    input: &[f32],
+    dimensions: [u32; 3],
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) {
     let t1 = std::time::Instant::now();
-    let output = block_on(pipe.dispatch(input, device, queue));
+    let output = block_on(pipe.dispatch(input, dimensions, device, queue));
 
     let t2 = std::time::Instant::now();
     let _output = block_on(output.unwrap());
