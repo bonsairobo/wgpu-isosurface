@@ -13,7 +13,7 @@ fn main() {
     let shader_flags = default_shader_flags(adapter.get_info().backend);
 
     // Data set.
-    let extent = Extent3i::from_min_and_shape(Point3i::fill(-32), Point3i::fill(64));
+    let extent = Extent3i::from_min_and_shape(Point3i::fill(-16), Point3i::fill(32));
     let sdf = Array3x1::fill_with(extent, |p| 20.0 - p.norm());
     let input = sdf.into_parts().1.take_store();
     let dim = extent.shape;
