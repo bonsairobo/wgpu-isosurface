@@ -16,7 +16,7 @@ branch = "main"
 # version = "0.7"
 git = "https://github.com/gfx-rs/wgpu-rs"
 # branch = "master"
-rev = "1de388af"
+rev = "53600ecd8"
 
 [[bin]]
 name = "generate"
